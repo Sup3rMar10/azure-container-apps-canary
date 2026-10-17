@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest pyyaml
+      - run: python -m pytest
+      - run: python -m aca_rollout simulate good
+      - run: python -m aca_rollout simulate bad-at-50 || test $? -eq 1
+
+  container:
+    # The container contract, checked on the real image: listens on $PORT, serves health, runs as non-root, drains and
+    # exits 0 on SIGTERM within seconds, and passes a vulnerability gate. No Azure involved.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t orders:ci app
+      - name: Starts, listens on the port it is given, and serves /healthz
+        run: |
+          docker run -d --name orders -e PORT=9090 -p 9090:9090 orders:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9090/healthz && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9090/healthz | grep -qx ok
+      - name: Does not run as root
+        run: test "$(docker exec orders id -u)" != "0"
+      - name: Drains and exits 0 on SIGTERM, well inside the termination grace period
+        run: |
+          start=$(date +%s)
+          docker stop -t 8 orders
+          elapsed=$(( $(date +%s) - start ))
+          code=$(docker inspect --format '{{.State.ExitCode}}' orders)
+          echo "stopped in ${elapsed}s with exit code ${code}"
+          test "$code" = "0"
+          test "$elapsed" -lt 6
+          docker logs orders | grep -q "stopped cleanly"
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: orders:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

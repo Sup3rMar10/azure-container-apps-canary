@@ -1,0 +1,56 @@
+# The Container App definition, in the YAML format `az containerapp create --yaml` takes.
+# Reference only: it has never been applied to a real subscription. ENVIRONMENT_ID and IMAGE are placeholders the
+# pipeline substitutes. NOTE the two settings the rollout controller depends on: Multiple revision mode, and traffic
+# pinned to a revision BY NAME (never `latestRevision: true`, which would hand every new revision traffic at once).
+name: orders
+type: Microsoft.App/containerApps
+location: westeurope
+properties:
+  managedEnvironmentId: ENVIRONMENT_ID
+  configuration:
+    activeRevisionsMode: Multiple
+    ingress:
+      external: true
+      targetPort: 8080
+      transport: auto
+      allowInsecure: false
+      traffic:
+        - revisionName: orders--v1
+          weight: 100
+  template:
+    revisionSuffix: v1
+    terminationGracePeriodSeconds: 30
+    containers:
+      - name: orders
+        image: IMAGE
+        env:
+          - name: APP_VERSION
+            value: "1"
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        probes:
+          - type: Startup
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 2
+            failureThreshold: 10
+          - type: Liveness
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+          - type: Readiness
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+    scale:
+      minReplicas: 1 # one warm replica, so a cold start is not what users meet first
+      maxReplicas: 10 # a cap, so a traffic spike (or a loop) cannot spend without limit
+      rules:
+        - name: http
+          http:
+            metadata:
+              concurrentRequests: "50"

@@ -1,0 +1,49 @@
+name: deploy
+
+# Reference pipeline, NEVER RUN against a real Azure subscription (there is none behind this repository).
+# Skipped unless the repository variable AZURE_DEPLOY_CLIENT_ID is set.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    # Only through the protected environment. In the Entra setup of azure-oidc-github-deploy the deploy application
+    # accepts exactly one subject: this repository's `production` environment.
+    if: vars.AZURE_DEPLOY_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write # lets this job request a GitHub OIDC token; nothing else gets it
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push the image
+        env:
+          REGISTRY: ${{ vars.ACR_NAME }}
+        run: az acr build --registry "$REGISTRY" --image "orders:${GITHUB_SHA}" app
+      - name: Roll out gradually, judging each step by its 5xx ratio, and go back by itself if it is bad
+        env:
+          GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP: ${{ vars.CONTAINER_APP }}
+          RESOURCE_ID: ${{ vars.CONTAINER_APP_RESOURCE_ID }}
+          REGISTRY: ${{ vars.ACR_NAME }}
+        run: >
+          python -m aca_rollout deploy --resource-group "$GROUP" --app "$APP" --resource-id "$RESOURCE_ID"
+          --image "${REGISTRY}.azurecr.io/orders:${GITHUB_SHA}" --suffix "r${GITHUB_RUN_NUMBER}"
